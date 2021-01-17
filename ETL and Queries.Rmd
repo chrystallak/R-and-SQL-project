@@ -1,0 +1,795 @@
+---
+title: "ETL2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r packages}
+#install.packages('bit64')
+library(bit64)
+#install.packages("data.table")
+library(ISLR); library(caret); library(caTools); library(ggplot2); library(dplyr); library(tidyr); library(lm.beta)
+library(glmnet); library(mice); library(psych); library(tidyverse); library(data.table); library(corrplot); library(car)
+library(leaps); library(rpart); library(rpart.plot); library(dendextend); library(rlist); library(cluster)
+library(mclust); library(qdap); library(stringr); library(tidytext); library(lexicon); library(remotes); library(tm)
+library(RPostgreSQL);
+library(tokenizers); library(wordcloud)
+ # library
+library(viridis);
+library(hrbrthemes);
+library(scales);
+ 
+```
+
+
+
+```{r load data}
+axe_dt = fread('Axe_Consumer_Data.csv')
+sales = fread("Axe_Sales_Data_Amazon.csv")
+
+str(axe_dt)
+axe_dt[19:21,]
+```
+
+``` {r data exploration}
+#Text Mining
+axe_dt$Review <- as.character(axe_dt$Review)
+
+#Explore Ratings
+glimpse(axe_dt)
+mean(axe_dt$Review_Rating)
+mean(nchar(axe_dt$Review))
+cor(nchar(axe_dt$Review), axe_dt$Review_Rating)
+median(str_count(string = axe_dt$Review, pattern = '\\S+'))
+max(str_count(string = axe_dt$Review, pattern = "\\S+"))
+min(str_count(string = axe_dt$Review, pattern = "\\S+"))
+
+
+```
+
+```{r Location Table}
+
+location.columns = c("State_Code", "State")
+location = axe_dt[, .SD, .SDcols = location.columns]
+colnames(location) = c("state_code", "state")
+
+location = distinct(location, state_code, .keep_all = TRUE)
+#location
+
+#write.csv(location,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/Location.csv", row.names = FALSE)
+
+```
+
+```{r Source Client Table}
+source_client = axe_dt[, .SD, .SDcols = "SourceClient", "ProductId"]
+source_client = source_client[, client_id := .GRP, SourceClient]
+
+merged1 = axe_dt[source_client, on = "ProductId", allow.cartesian = TRUE]
+merged1[, grep("^i\\.", names(merged1), value=TRUE) := NULL]
+
+source_client = source_client[, .SD, .SDcols = c("SourceClient", "client_id")]
+colnames(source_client) = c("client_name", "client_id")
+source_client = distinct(source_client, client_id, .keep_all = TRUE)
+#source_client
+
+#write.csv(source.client,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/Source Client.csv", row.names = FALSE)
+
+```
+
+
+```{r Category Table}
+categories = axe_dt[, .SD, .SDcols= c("Category", "ProductId")]
+categories = categories[, category_id := .GRP, Category]
+
+merged1 = distinct(merged1, ProductId, .keep_all = TRUE)
+merged1 = merged1[categories, on = "ProductId", allow.cartesian = TRUE]
+merged1[, grep("^i\\.", names(merged1), value=TRUE) := NULL]
+
+
+categories = categories[, .SD, .SDcols = c("Category", "category_id")]
+colnames(categories) = c("category", "category_id")
+categories = distinct(categories, category_id, .keep_all = TRUE)
+#categories
+
+#write.csv(categories,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/categories.csv", row.names = FALSE)
+
+```
+
+```{r Marketing Segment Table}
+
+#Cluster based on Location, Rating, and Tokens
+data_cluster = axe_dt[,c(8,13:14,19)]
+data_cluster$State = as.numeric(as.factor(data_cluster$State))
+summary(data_cluster)
+str(data_cluster)
+table(data_cluster$State)
+sum(is.na(data_cluster))
+data_cluster_scale = scale(data_cluster[,-1])
+data_cluster_scale[10,"State"]
+
+# Model based - Clustering automatic
+clus_m = Mclust(data_cluster_scale,G=4)
+axe_dat_sentiment_segment = cbind(axe_dt,clus_m$classification)
+str(axe_dat_sentiment_segment)
+
+axe_dat_sentiment_segment = as.data.table(axe_dat_sentiment_segment)
+marketing_segment = axe_dat_sentiment_segment[, .SD, .SDcols = c("V2")]
+
+colnames(marketing_segment) = c("segment_id")
+
+marketing_segment = marketing_segment[segment_id == 1, segment_name := "Segment 1"]
+marketing_segment = marketing_segment[segment_id == 2, segment_name := "Segment 2"]
+marketing_segment = marketing_segment[segment_id == 3, segment_name := "Segment 3"]
+marketing_segment = marketing_segment[segment_id == 4, segment_name := "Segment 4"]
+
+marketing_segment = distinct(marketing_segment, segment_id, .keep_all = TRUE)
+
+#write.csv(marketing_segment,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/marketing_segment.csv", row.names = FALSE)
+
+```
+
+
+```{r Sentiments Table}
+
+#Top 25 words used, no stop words
+axe_dt%>%
+  unnest_tokens(input = Review, output = word)%>%
+  select(word)%>%
+  anti_join(stop_words)%>%
+  group_by(word)%>%
+  summarize(count = n())%>%
+  ungroup()%>%
+  arrange(desc(count))%>%
+  top_n(25)
+
+axe_data_sentiments = axe_dt %>%
+  select(ID,Review,Review_Rating)%>%
+  group_by(ID)%>%
+  unnest_tokens(output=word,input=Review)%>%
+  ungroup()%>%
+  inner_join(get_sentiments('bing'))%>%
+  group_by(ID,sentiment)%>%
+  summarize(n = n())%>%
+  mutate(proportion = n/sum(n))
+
+axe_data_sentiments_1 = axe_data_sentiments %>% 
+  group_by(ID) %>% 
+  summarise(proportion = max(proportion))
+
+axe_data_sentiments_2 = merge(axe_data_sentiments, axe_data_sentiments_1, by = c("ID","proportion"))
+axe_data_sentiments_2 = axe_data_sentiments_2[,c(1,3)]%>% 
+  group_by(ID) %>% 
+  summarise(sentiment = max(sentiment))
+
+axe_dt = merge(axe_dt, axe_data_sentiments_2, by = "ID", all.x = TRUE)
+sentiments = axe_dt[, .SD, .SDcols = c("sentiment")]
+
+
+sentiments = sentiments[!(sentiments$sentiment == ""), ]
+sentiments = distinct(sentiments, sentiment, .keep_all = TRUE)
+
+sentiments = sentiments[, sentiment_id := .GRP, sentiment]
+
+#str(sentiments)
+
+#write.csv(sentiments,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/sentiments.csv", row.names = FALSE)
+```
+
+
+```{r Customers Table}
+
+customer.data = fread("Customer data.csv")
+customers = axe_dat_sentiment_segment[,.SD,.SDcols = c("CID", "State_Code", "V2")]
+customers = cbind(customers, customer.data)
+
+colnames(customers) = c("customer_id", "state_code", "segment_id", "first_name", "last_name", "email")
+customers = distinct(customers, customer_id, .keep_all = TRUE)
+
+
+#customers
+
+#write.csv(customers,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/customers.csv", row.names = FALSE)
+
+
+```
+
+```{r Reviews Table}
+axe_sentiment = merge(axe_dt, sentiments, by = "sentiment")
+reviews = axe_sentiment[, .SD, .SDcols = c("CID", "SubmissionTime", "Review_Rating", "Review", "Title", "sentiment_id", "ProductId")]
+reviews = reviews[, review_id := .GRP, by = .(CID, SubmissionTime)]
+colnames(reviews) = c("customer_id", "start_date", "review_rating", "review", "title", "sentiment_id","product_id", "review_id")
+
+#write.csv(reviews,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/reviews.csv", row.names = FALSE)
+
+```
+
+```{r Brands Table}
+#split product description column
+
+axe_dt[, paste0("Product_Description", 1:9) := tstrsplit(Product_Description, " ")]
+
+brands = axe_dt[, .SD, .SDcols = c("Product_Description1", "ProductId")]
+brands$Product_Description1 = gsub("AXE", "Axe", brands$Product_Description1)
+brands = brands[, brand_id := .GRP, Product_Description1]
+
+merged1 = merged1[brands, on = "ProductId", allow.cartesian = TRUE]
+merged1[, grep("^i\\.", names(merged1), value=TRUE) := NULL]
+
+brands = brands[, .SD, .SDcols = c("Product_Description1", "brand_id")]
+colnames(brands) = c("brand", "brand_id")
+brands = distinct(brands, brand_id, .keep_all = TRUE)
+#brands
+
+#write.csv(brands,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/brands.csv", row.names = FALSE)
+
+```
+
+```{r Product Formant Table}
+product_format = axe_dt[, .SD, .SDcols = c("ProductId","format", "size_oz", "size_ml")]
+product_format = product_format[, format_id := .GRP, by = .(format, size_oz)]
+
+merged1 = distinct(merged1, ProductId, .keep_all = TRUE)
+merged1 = merged1[product_format, on = "ProductId", allow.cartesian = TRUE]
+merged1[, grep("^i\\.", names(merged1), value=TRUE) := NULL]
+
+product_format = product_format[, .SD, .SDcols = c("format", "size_oz", "size_ml", "format_id")]
+colnames(product_format) = c("format", "volume_oz", "volume_ml", "format_id")
+product_format = distinct(product_format, format_id, .keep_all = TRUE)
+#product_format
+
+#write.csv(product_format,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/product_format.csv", row.names = FALSE)
+
+```
+
+```{r Product Variant Table}
+product_variant = merged1[, .SD, .SDcols = c("ProductId","variant")]
+product_variant = product_variant[, product_variant_id := .GRP, variant]
+
+merged1 = distinct(merged1, ProductId, .keep_all = TRUE)
+merged1 = merged1[product_variant, on = "ProductId", allow.cartesian = TRUE]
+merged1[, grep("^i\\.", names(merged1), value=TRUE) := NULL]
+
+
+product_variant = distinct(product_variant, product_variant_id, .keep_all = TRUE)
+
+
+product_variant = product_variant[, .SD, .SDcols = c("variant", "product_variant_id")]
+#product_variant
+#write.csv(product_variant,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/product_variant.csv", row.names = FALSE)
+
+```
+
+```{r Pricing Table}
+pricing = data.table(
+  price_bracket_id = c(1:5),
+  price_discount = c(0.05,0.10,0.15,0.20, 0.25)
+)
+#pricing
+
+#write.csv(pricing,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/pricing.csv", row.names = FALSE)
+
+```
+
+#remove ave unit price
+```{r Promotion Campaign Table}
+promotion_campaign = axe_dt[, .SD, .SDcols = c("Campaign_ID")]
+
+colnames(promotion_campaign) = c("campaign_description")
+
+promotion_campaign = promotion_campaign[!(promotion_campaign$campaign_description == ""), ]
+
+promotion_campaign = promotion_campaign[, campaign_product_id := .GRP, .(campaign_description)]
+
+promotion_campaign = distinct(promotion_campaign, campaign_product_id, .keep_all = TRUE)
+
+promotion_campaign = promotion_campaign[campaign_description == "BV_REVIEW_DISPLAY", price_bracket_id := 1,]
+promotion_campaign = promotion_campaign[campaign_description == "BV_RATING_SUMMARY", price_bracket_id := 1,]
+promotion_campaign = promotion_campaign [campaign_description == "bvsampling_axe_pilot_campaign_2016055", price_bracket_id := 2,]
+promotion_campaign = promotion_campaign[campaign_description == "AxeAdvancedCollection_BodyWash", price_bracket_id := 2,]
+promotion_campaign = promotion_campaign[campaign_description == "crowdtap", price_bracket_id := 1,]
+
+#promotion_campaign
+
+#write.csv(promotion_campaign,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/promotion_campaign.csv", row.names = FALSE)
+
+
+```
+
+
+#INSTEAD OF SUB CATEGORY TABLE USE PRODUCT FAMILY TABLE
+```{r Product Family Table}
+
+
+product_family = axe_dt[, .SD, .SDcols = c("Product_Family")]
+product_family = distinct(product_family, Product_Family, .keep_all = TRUE)
+product_family = product_family[, product_family_id :=.GRP, Product_Family]
+
+merged1 = merged1[product_family, on = "Product_Family", allow.cartesian = TRUE]
+merged1[, grep("^i\\.", names(merged1), value=TRUE) := NULL]
+
+
+product_family = product_family[, .SD, .SDcols = "Product_Family", "product_family_id"]
+colnames(product_family) = c("product_family_id", "product_family")
+#product_family
+
+#write.csv(product_family,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/product_family.csv", row.names = FALSE)
+
+
+```
+
+
+
+```{r Products Table}
+products = merged1[, .SD, .SDcols = c("ProductId", "Unit_UPC", "Case_UPC", "ASIN", "Product_Description", "Ave_Sales_Price", "format_id", "brand_id",
+                                      "client_id", "category_id", "product_variant_id", "product_family_id")]
+
+products = distinct(products, ProductId, .keep_all = TRUE)
+
+
+colnames(products) = c("product_id", "unit_upc", "cs_upc", "asin", "product_description", "unit_price", "format_id", "brand_id", "client_id", "category_id", "product_variant_id", "product_family_id" )
+
+#products
+
+
+#write.csv(products,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/products.csv", row.names = FALSE)
+
+```
+
+```{r Transactions Table}
+
+transactions_1 = sales[, .SD, .SDcols = c("Date", "Case_UPC", "Actual_Sales")]
+
+dat = axe_dt[, .SD, .SDcols = c("ProductId", "Case_UPC", "Campaign_ID", "Ave_Sales_Price")]
+
+transactions_2 = transactions_1[transactions_1$Case_UPC %in% dat$Case_UPC, .(Date, Case_UPC, Actual_Sales),]
+
+transactioons = merge(transactions_2, dat, by = "Case_UPC", allow.cartesian = TRUE)
+transactions = merge(transactions, promotion_campaign, by.x = "Campaign_ID", by.y = "campaign_description")
+
+transactions = transactions[, .SD, .SDcols = c("Date", "ProductId", "Actual_Sales", "Ave_Sales_Price", "campaign_product_id")]
+
+transactions = transactions[!(transactions$Actual_Sales == 0), ]
+
+transactions = transactions[, trans_id := .GRP, .(Date, ProductId)]
+
+
+transactions = distinct(transactions, trans_id, .keep_all = TRUE)
+
+
+colnames(transactions) = c("purchase_timestamp", "product_id", "quantity", "price", "campaign_product_id", "trans_id")
+
+#transactionse
+
+#write.csv(transactions,"/Users/Chrystalla/Documents/University/Columbia/Semester 3/SQL & Relational Databases/Group/Tables/transactions.csv", row.names = FALSE)
+
+
+```
+
+```{r establish connection and load schema}
+
+require('RPostgreSQL')
+drv = dbDriver('PostgreSQL')
+
+con = dbConnect(drv, dbname = 'axe3',
+                host = 'localhost', port = 5432,
+                user = 'postgres', password = '123')
+stmt = "CREATE TABLE location (
+	state_code char(2),
+	state varchar(50),
+	PRIMARY KEY (state_code)
+);
+CREATE TABLE source_client(
+	client_id int,
+	client_name varchar(100) NOT NULL,
+	PRIMARY KEY (client_id)
+);
+CREATE TABLE marketing_segment (
+	segment_id int,
+	segment_name varchar(50),
+	PRIMARY KEY (segment_id)
+);
+CREATE TABLE customers (
+	customer_id varchar(100),
+	state_code varchar(2),
+	first_name varchar(100) NOT NULL,
+	last_name varchar(100) NOT NULL,
+	email varchar(100) NOT NULL,
+	segment_id int,
+	PRIMARY KEY (customer_id),
+	FOREIGN KEY (state_code) REFERENCES location (state_code),
+	FOREIGN KEY (segment_id) REFERENCES marketing_segment (segment_id)
+);
+CREATE TABLE product_format (
+	format varchar(50) NOT NULL,
+	volume_oz numeric(10,5) NOT NULL,
+	volume_ml numeric(10,5) NOT NULL,
+	format_id int,
+	PRIMARY KEY (format_id)
+);
+CREATE TABLE product_variant (
+	variant varchar(200) NOT NULL,
+	product_variant_id int,
+	PRIMARY KEY (product_variant_id),
+);
+CREATE TABLE categories (
+	category varchar(100) NOT NULL,
+	category_id int,
+	PRIMARY KEY (category_id)
+);
+CREATE TABLE product_family (
+	product_family_id int,
+	product_family  varchar(100) NOT NULL,
+	PRIMARY KEY (product_family_id)
+);
+CREATE TABLE brands (
+	brand_id int,
+	brand  varchar(100) NOT NULL,
+	PRIMARY KEY (brand_id)
+);
+CREATE TABLE pricing (
+	price_bracket_id int,
+	price_discount numeric(5,2) NOT NULL,
+	PRIMARY KEY (price_bracket_id)
+);
+CREATE TABLE products (
+	product_id varchar(20),
+	unit_upc varchar(14),
+	cs_upc char(12) NOT NULL,
+	asin varchar(20),
+	product_description varchar(200) NOT NULL,
+	unit_price numeric(5,2) NOT NULL,
+	format_id int NOT NULL,
+	brand_id int NOT NULL,
+	client_id int NOT NULL,
+	category_id int NOT NULL,
+	product_variant_id int NOT NULL,
+	product_family_id int NOT NULL,
+	PRIMARY KEY (product_id),
+	FOREIGN KEY (product_variant_id) REFERENCES product_variant (product_variant_id),
+	FOREIGN KEY (format_id) REFERENCES product_format (format_id),
+	FOREIGN KEY (category_id) REFERENCES categories (category_id),
+	FOREIGN KEY (brand_id) REFERENCES brands (brand_id),
+	FOREIGN KEY (client_id) REFERENCES source_client (client_id)
+);
+CREATE TABLE promotion_campaign (
+	campaign_description varchar(200) NOT NULL,
+	campaign_product_id int,
+	price_bracket_id int,
+	PRIMARY KEY (campaign_product_id),
+	FOREIGN KEY (price_bracket_id) REFERENCES pricing (price_bracket_id)
+);
+CREATE TABLE transactions (
+	purchase_timestamp timestamp NOT NULL,
+	product_id varchar(20),
+	quantity int NOT NULL,
+	price numeric(5,2) NOT NULL,
+	campaign_product_id int,
+	trans_id int,
+	PRIMARY KEY (trans_id),
+	FOREIGN KEY (product_id) references products (product_id),
+	FOREIGN KEY (campaign_product_id) references promotion_campaign (campaign_product_id)
+);
+CREATE TABLE sentiments (
+	sentiment_id 	int,
+	sentiment varchar(100),
+	PRIMARY KEY (sentiment_id)
+);
+CREATE TABLE reviews (
+	customer_id varchar(100) NOT NULL,
+	start_date	timestamp NOT NULL,
+	review_rating int NOT NULL,
+	review	text,
+	title	text,
+	review_id 	int,
+	sentiment_id int,
+	product_id varchar(20),
+	PRIMARY KEY (review_id),
+	FOREIGN KEY (customer_id) REFERENCES customers (customer_id),
+	FOREIGN KEY (sentiment_id) REFERENCES sentiments (sentiment_id),
+	FOREIGN KEY (product_id) REFERENCES products (product_id)
+);"
+
+dbGetQuery(con, stmt)
+
+```
+
+
+``` {r load data to postgres}
+
+dbWriteTable(conn = con, name = "location", value = location, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "source_client", value = source_client, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "marketing_segment", value = marketing_segment, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "customers", value = customers, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "product_format", value = product_format, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "product_variant", value = product_variant, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "categories", value = categories, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "product_family", value = product_family, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "brands", value = brands, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "pricing", value = pricing, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "promotion_campaign", value = promotion_campaign, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "sentiments", value = sentiments, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "products", value = products, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "reviews", value = reviews, append = TRUE, row.names = FALSE)
+dbWriteTable(conn = con, name = "transactions", value = transactions, append = TRUE, row.names = FALSE)
+
+```
+
+
+``` {r Query 1:wordcloud}
+
+stmt2 = 
+"SELECT review_rating, c.category, review, avg(review_rating)
+OVER (PARTITION BY c.category) as average_review
+FROM reviews, products, categories as c
+WHERE review_rating BETWEEN 4 AND 5 AND reviews.product_id = products.product_id AND products.category_id = c.category_id
+GROUP BY review_rating, c.category, review;"
+wordcloud_df = dbGetQuery(con, stmt2)
+wordcloud_df = as.data.table(wordcloud_df)
+deodorant.dat = wordcloud_df[category == "DEODORANT", .SD, .SDcols = "review" ]
+body.dat = wordcloud_df[category == "BODY WASH", .SD, .SDcols = "review" ]
+hair.dat = wordcloud_df[category == "HAIR APPLICATION", .SD, .SDcols = "review" ]
+shampoo.dat = wordcloud_df[category == "SHAMPOO AND CONDITIONER", .SD, .SDcols = "review" ]
+colnames(deodorant.dat) = "Deodorant"
+colnames(body.dat) = "BodyWash"
+colnames(hair.dat) = "HairApplication"
+colnames(shampoo.dat) = "Shampoo+Conditioner"
+clean.text = function(x)
+{
+  # tolower
+  x = tolower(x)
+  # remove rt
+  x = gsub("rt", "", x)
+  # remove at
+  x = gsub("@\\w+", "", x)
+  # remove punctuation
+  x = gsub("[[:punct:]]", "", x)
+  # remove numbers
+  x = gsub("[[:digit:]]", "", x)
+  # remove links http
+  x = gsub("http\\w+", "", x)
+  # remove tabs
+  x = gsub("[ |\t]{2,}", "", x)
+  # remove blank spaces at the beginning
+  x = gsub("^ ", "", x)
+  # remove blank spaces at the end
+  x = gsub(" $", "", x)
+  return(x)
+}
+deod.clean = clean.text(deodorant.dat)
+body.clean = clean.text(body.dat)
+hair.clean = clean.text(hair.dat)
+shampoo.clean = clean.text(shampoo.dat)
+deodorant = paste(deodorant.dat, collapse=" ")
+body = paste(body.dat, collapse=" ")
+hair = paste(hair.dat, collapse=" ")
+shampoo = paste(shampoo.dat, collapse=" ")
+
+# put everything in a single vector
+four.categories = c(deodorant, body, hair, shampoo)
+four.categories = removeWords(four.categories, c(stopwords("english")))
+#create corpus
+corpus = Corpus(VectorSource(four.categories))
+# create term-document matrix
+tdm = TermDocumentMatrix(corpus)
+# convert as matrix
+tdm = as.matrix(tdm)
+# add column names
+colnames(tdm) = c("Deodorant", "BodyWash", "HairApplication", "Shampoo+Conditioner")
+# comparison cloud
+comparison.cloud(tdm, random.order=FALSE, 
+                 colors = c("#00B2FF", "red", "#FF0099", "#6600CC"),
+                 title.size=1.5, max.words=250, scale=c(4,.3))
+
+```
+
+```{r Query 2: promotion campaign}
+
+stmt3 = 
+  "SELECT x.campaign_description, x.category, x.total_sales, sum(x.total_sales) OVER (PARTITION BY x.category) as Total_Sales_Per_Category
+FROM (SELECT a.campaign_description, c.category, (quantity*price) as total_sales
+	 FROM products as p, categories as c, promotion_campaign as a, transactions as t
+     WHERE p.category_id = c.category_id AND t.product_id = p.product_id 
+	  AND t.campaign_product_id = a.campaign_product_id) as x"
+stmt4 = 
+"SELECT x.campaign_description, x.category, x.total_sales, sum(x.total_sales) OVER (PARTITION BY x.campaign_description) as Total_Sales_Per_Campaign
+FROM (SELECT a.campaign_description, c.category, (quantity*price) as total_sales
+	 FROM products as p, categories as c, promotion_campaign as a, transactions as t
+     WHERE p.category_id = c.category_id AND t.product_id = p.product_id 
+	  AND t.campaign_product_id = a.campaign_product_id) as x"
+
+campaign_category = dbGetQuery(con, stmt3)
+campaign_name = dbGetQuery(con, stmt4)
+point <- format_format(big.mark = " ", decimal.mark = ",", scientific = FALSE)
+ggplot(campaign_category, aes(fill=category, y=total_sales, x=campaign_description)) + 
+    geom_bar(position="stack", stat="identity")+
+   scale_fill_viridis(discrete = T) +
+    ggtitle("Campaign sales grouped by product category") +
+   facet_wrap(~category) +
+    theme_ipsum() +
+    theme(axis.text.x = element_text(angle = 10))+
+  scale_y_continuous(name = "Sales ($)", labels = point) +
+   theme(axis.title.y = element_text(vjust=5, hjust = 0.5))+
+  xlab("")
+ggplot(campaign_category, aes(fill=category, y=total_sales, x=campaign_description)) + 
+    geom_bar(position="stack", stat="identity")+
+   scale_fill_viridis(discrete = T) +
+    ggtitle("Campaign sales grouped by product category") +
+    theme_ipsum() +
+  scale_y_continuous(name = "Sales ($)", labels = point) +
+   theme(axis.title.y = element_text(vjust=5, hjust = 0.5))+
+  xlab("")
+
+```
+
+``` {r Query 3: Sales per category}
+
+stmt5 = 
+"SELECT
+	SUM(t.quantity*t.price) AS revenue,
+	c.category
+FROM transactions t
+JOIN products p ON t.product_id = p.product_id
+JOIN categories c ON p.category_id = c.category_id
+GROUP BY c.category"
+
+category_sales = dbGetQuery(con, stmt5)
+
+category_sales
+
+```
+
+``` {r Query 4: Customer segment ratings and price}
+stmt6 = 
+  "SELECT c.segment_id as customer_segment, AVG(r.review_rating) as average_rating, AVG(p.unit_price) as average_price
+FROM customers c NATURAL JOIN reviews r NATURAL JOIN products p
+WHERE c.customer_id = r.customer_id AND r.product_id = p.product_id AND r.sentiment_id= '1'
+GROUP BY customer_segment
+ORDER BY average_rating DESC;"
+
+sentiment_customers = dbGetQuery(con, stmt6)
+
+sentiment_customers
+```
+
+```{r Query 5: Annual Sales per Category }
+
+stmt7 = 
+  "SELECT c.category as axe_categories, EXTRACT(year from t.purchase_timestamp) as year, SUM(t.quantity) as total_sales
+FROM transactions as t, products as p, categories as c
+WHERE t.product_id = p.product_id AND p.category_id = c.category_id
+GROUP BY (axe_categories, year)
+ORDER BY year DESC;"
+
+annual_sales = dbGetQuery(con, stmt7)
+
+ggplot(annual_sales, aes(fill=axe_categories, y=total_sales, x=year)) + 
+    geom_bar(position="stack", stat="identity")+
+   scale_fill_viridis(discrete = T) +
+    ggtitle("Annual Sales per Category") +
+    theme_ipsum() +
+  scale_y_continuous(name = "Sales ($)", labels = point) +
+   theme(axis.title.y = element_text(vjust=5, hjust = 0.5))+
+  xlab("")
+
+```
+
+
+```{r Query 6: Reviews per rating+category and rating+products}
+stmt8 = "SELECT p.product_description, r.review_rating, COUNT(r.review) as total_reviews
+FROM reviews as r, products as p
+WHERE r.product_id = p.product_id
+GROUP BY r.review_rating,p.product_description
+ORDER BY p.product_description,r.review_rating;"
+  
+stmt9 = 
+"SELECT c.category, r.review_rating, COUNT(r.review) as total_reviews
+FROM reviews as r, products as p, categories as c
+WHERE r.product_id = p.product_id AND p.category_id = c.category_id
+GROUP BY r.review_rating,c.category
+ORDER BY c.category,r.review_rating;"
+
+product_reviews = dbGetQuery(con, stmt8)
+
+category_reviews = dbGetQuery(con, stmt9)
+product_reviews
+category_reviews
+```
+
+```{r Query 7:Sales per Product}
+
+stmt10 = 
+  "SELECT p.product_description, EXTRACT(month from t.purchase_timestamp) as month, SUM(t.quantity) as total_sales
+FROM products AS p, transactions AS t
+WHERE p.product_id = t.product_id AND t.purchase_timestamp > '03-01-2020'
+GROUP BY (p.product_description, month)
+ORDER BY total_sales DESC;"
+  
+stmt11 = 
+  "SELECT p.product_description, EXTRACT(year from t.purchase_timestamp) as year, SUM(t.quantity) as total_sales
+FROM products AS p, transactions AS t
+WHERE p.product_id = t.product_id AND t.purchase_timestamp > '01-01-2019'
+GROUP BY (p.product_description, year)
+ORDER BY p.product_description DESC;"
+
+sales_2020 = dbGetQuery(con, stmt10)
+sales_2019 = dbGetQuery(con, stmt11)
+sales_2020
+sales_2019
+```
+
+```{r Query 8: Customer sentiments for new products}
+
+stmt12 = 
+  "SELECT COUNT (*) as segment_size, segment_id
+FROM customers
+GROUP BY segment_id
+ORDER BY segment_size desc"
+
+customer_segment = dbGetQuery(con, stmt12)
+customer_segment
+
+```
+
+
+```{r Query 9:Sentiment Percentage per State}
+
+stmt13 = 
+  "WITH sen_count AS (
+	SELECT
+		c.state_code,
+		s.sentiment,
+		count(*) AS sentiment_count
+	FROM customers c
+	JOIN reviews r ON c.customer_id = r.customer_id
+	JOIN sentiments s ON r.sentiment_id = s.sentiment_id
+	GROUP BY 1,2
+), state_count AS (
+	SELECT
+		c.state_code,
+		count(*) AS state_count
+	FROM customers c
+	JOIN reviews r ON c.customer_id = r.customer_id
+	JOIN sentiments s ON r.sentiment_id = s.sentiment_id
+	GROUP BY 1
+)
+SELECT
+	s1.state_code,
+	s1.sentiment,
+	s1.sentiment_count,
+	s2.state_count,
+	s1.sentiment_count/s2.state_count::float
+FROM sen_count s1
+JOIN state_count s2 USING(state_code)"
+
+sentiment_per_state = dbGetQuery(con, stmt13)
+
+sentiment_per_state
+```
+
+```{r Query 10: Customer sentiment for new products}
+
+stmt14 = 
+  "SELECT COUNT (*) as aggregated_sentiment
+FROM reviews
+WHERE product_id = 79400339928
+GROUP BY sentiment_id
+ORDER BY aggregated_sentiment Desc"
+
+new_product_sentiment = dbGetQuery(con, stmt14)
+new_product_sentiment
+
+```
+
+
+
+
+
+
+
+
+
+
